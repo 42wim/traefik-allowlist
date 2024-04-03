@@ -1,0 +1,9 @@
+displayName: Allow Source
+summary: Allow ip/cidr and DNS names based on X-Forwarded-For header
+type: middleware
+import: github.com/42wim/traefik-allowlist
+testData:
+  allow:
+    - 1.2.3.4
+    - joske.be
+    - 10.0.0.0/8
