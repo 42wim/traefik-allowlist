@@ -32,6 +32,7 @@ type AllowList struct {
 	authorizedIPsNet     []*net.IPNet
 	authorizedIPsDynamic []*net.IP
 	allowedhosts         []string
+	lastCheck            time.Time
 	sync.RWMutex
 }
 
@@ -49,31 +50,54 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 }
 
 func (u *AllowList) parseDNSthread() {
-	for {
-		time.Sleep(time.Second * 3)
+	var (
+		dynips  []*net.IP
+		wg      sync.WaitGroup
+		syncMap sync.Map
+	)
 
-		var dynips []*net.IP
+	for idx, entry := range u.allowedhosts {
+		wg.Add(1)
 
-		for _, entry := range u.allowedhosts {
-			addrs, err := net.LookupHost(entry)
+		go func(idx int, entry string) {
+			defer wg.Done()
+
+			r := &net.Resolver{}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+
+			defer cancel()
+
+			addrs, err := r.LookupHost(ctx, entry)
 			if err != nil {
-				continue
+				if errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
 			}
 
 			// put the addresses in dynip list
-			for _, addr := range addrs {
+			for idx2, addr := range addrs {
 				if ipAddr := net.ParseIP(addr); ipAddr != nil {
-					dynips = append(dynips, &ipAddr)
-					continue
+					syncMap.Store((idx*100)+idx2, &ipAddr)
 				}
 			}
+		}(idx, entry)
+	}
+
+	wg.Wait()
+
+	syncMap.Range(func(_, value any) bool {
+		if v, ok := value.(*net.IP); ok {
+			dynips = append(dynips, v)
 		}
 
-		// swap our dynamic array
-		u.Lock()
-		u.authorizedIPsDynamic = dynips
-		u.Unlock()
-	}
+		return true
+	})
+
+	// swap our dynamic array
+	u.Lock()
+	u.authorizedIPsDynamic = dynips
+	u.lastCheck = time.Now()
+	u.Unlock()
 }
 
 // parseConfig parses config on startup
@@ -109,6 +133,8 @@ func (u *AllowList) parseConfig(config *Config) {
 			}
 		}
 	}
+
+	u.lastCheck = time.Now()
 }
 
 func parseIP(addr string) (net.IP, error) {
@@ -124,6 +150,10 @@ func parseIP(addr string) (net.IP, error) {
 }
 
 func (u *AllowList) allowIP(addr string) (bool, error) {
+	if time.Since(u.lastCheck) > time.Second*3 {
+		go u.parseDNSthread()
+	}
+
 	if addr == "" {
 		return false, errors.New("empty IP address")
 	}
